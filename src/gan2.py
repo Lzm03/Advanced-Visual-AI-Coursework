@@ -137,11 +137,24 @@ def discriminator_loss(real_output, fake_output):
 
     return real_loss + fake_loss
 
+import os
+from torchvision.utils import save_image
+
+def save_images(epoch, lr_images, hr_images, fake_images, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+    for i, (lr, hr, fake) in enumerate(zip(lr_images, hr_images, fake_images)):
+        save_image(lr, os.path.join(save_dir, f'epoch_{epoch}_lr_{i}.png'))
+        save_image(hr, os.path.join(save_dir, f'epoch_{epoch}_hr_{i}.png'))
+        save_image(fake, os.path.join(save_dir, f'epoch_{epoch}_fake_{i}.png'))
+
+
 generator = Generator().to(device)
 discriminator = Discriminator().to(device)
 
 optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
 optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+
+results_dir = "./training_results"
 
 import torch
 from tqdm import tqdm
@@ -151,11 +164,14 @@ for epoch in range(10):
     discriminator.train()
     total_loss_D = 0
     total_loss_G = 0
-    
-    for lr_images, hr_images in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+
+    for batch_idx, (lr_images, hr_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
         lr_images, hr_images = lr_images.to(device), hr_images.to(device)
 
+        # 生成器生成图像
         fake_images = generator(lr_images)
+
+        # 判别器损失
         real_output = discriminator(hr_images)
         fake_output = discriminator(fake_images.detach())
         loss_D = discriminator_loss(real_output, fake_output)
@@ -163,6 +179,7 @@ for epoch in range(10):
         loss_D.backward()
         optim_D.step()
 
+        # 生成器损失
         fake_output = discriminator(fake_images)
         loss_G = generator_loss(fake_output, fake_images, hr_images)
         optim_G.zero_grad()
@@ -171,5 +188,10 @@ for epoch in range(10):
 
         total_loss_D += loss_D.item()
         total_loss_G += loss_G.item()
+
+        # 每个batch保存一些图像
+        if batch_idx == 0:  # 每个epoch只保存一次
+            save_dir = os.path.join(results_dir, f"epoch_{epoch+1}")
+            save_images(epoch + 1, lr_images.cpu(), hr_images.cpu(), fake_images.cpu(), save_dir)
 
     print(f"Epoch {epoch+1}, Loss_D: {total_loss_D/len(train_loader):.4f}, Loss_G: {total_loss_G/len(train_loader):.4f}")
