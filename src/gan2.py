@@ -97,19 +97,22 @@ class Generator(nn.Module):
         return torch.sigmoid(self.conv2(x))  # 输出范围[0, 1]
 
 
+
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(channels),
-        )
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.bn2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
-        return x + self.block(x)  # 残差连接
+        res = x
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        return x + res
+
 
 
 
@@ -177,40 +180,26 @@ def discriminator_loss(real_output, fake_output):
 
 from utils.save_checkpoint import save_checkpoint
 
-def training(x):
-    
-    '''Training step for the Discriminator'''
-    real_x = x.to(device)
-    real_output = gan_D(real_x)
-
-    # Backpropagate the discriminator loss and update its parameters
-    # for _ in range(2):
-    fake_x = gan_G(torch.randn([batch_size, input_dim]).to(device)).detach()
-    fake_output = gan_D(fake_x)
-    loss_D =discriminator_loss(real_output, fake_output)
+def training(lr_images, hr_images):
+    # Training the Discriminator
     optim_D.zero_grad()
+    fake_images = gan_G(lr_images).detach()  # Generate fake images from low-resolution images
+    real_output = gan_D(hr_images)  # Real output from high-resolution images
+    fake_output = gan_D(fake_images)  # Fake output from generated images
+    loss_D = discriminator_loss(real_output, fake_output)
     loss_D.backward()
     optim_D.step()
-    
-    # if abs(loss_D.item()) < 0.1:  # 判别器和生成器接近平衡
-    #     generator_steps = 10
-    # elif abs(loss_D.item()) > 0.5:  # 判别器过强
-    #     generator_steps = 1
-    # else:
-    #     generator_steps = 5
-        
-    '''Training step for the Generator'''
-    for _ in range(5):
-        fake_x = gan_G(torch.randn([batch_size, input_dim]).to(device))
-        fake_output = gan_D(fake_x)
-        loss_G = generator_loss(fake_output)
 
-        # Backpropagate the generator loss and update its parameters
-        optim_G.zero_grad()
-        loss_G.backward()
-        optim_G.step()
+    # Training the Generator
+    optim_G.zero_grad()
+    fake_images = gan_G(lr_images)  # Generate fake images from low-resolution images
+    fake_output = gan_D(fake_images)  # Fake output from generated images
+    loss_G = generator_loss(fake_output, fake_images, hr_images)
+    loss_G.backward()
+    optim_G.step()
 
     return loss_D, loss_G
+
 
 def discriminator_loss(real_output, fake_output):
     # Loss for real images
@@ -333,13 +322,13 @@ optim_G = torch.optim.Adam(gan_G.parameters(), lr=lr, betas=(0.5, 0.999))
 # optim_D = torch.optim.Adam(gan_D.parameters(), lr=0.000001, betas=(0.5, 0.999))
 # scheduler_G = torch.optim.lr_scheduler.StepLR(optim_G, step_size=10, gamma=0.5)
 # scheduler_D = torch.optim.lr_scheduler.StepLR(optim_D, step_size=10, gamma=0.5)
-checkpoint_path = './training_checkpoints_28/ckpt_epoch_0018.pth'
+# checkpoint_path = './training_checkpoints_28/ckpt_epoch_0018.pth'
 
-start_epoch = 0
-if os.path.exists(checkpoint_path):
-    start_epoch = load_checkpoint(checkpoint_path, gan_G, gan_D, optim_G, optim_D)
-else:
-    print("No checkpoint found. Starting training from scratch.")
+# start_epoch = 0
+# if os.path.exists(checkpoint_path):
+#     start_epoch = load_checkpoint(checkpoint_path, gan_G, gan_D, optim_G, optim_D)
+# else:
+#     print("No checkpoint found. Starting training from scratch.")
 
 iteration_losses_D = []
 iteration_losses_G = []
@@ -350,33 +339,29 @@ for epoch in range(num_epoch):
     start_time = time.time()
     total_loss_D, total_loss_G = 0, 0
     
-    for i, (x, _) in enumerate(train_loader):
-        loss_D, loss_G = training(x)
+    for i, (lr_images, hr_images) in enumerate(train_loader):
+        lr_images, hr_images = lr_images.to(device), hr_images.to(device)
+        
+        # Training the discriminator and generator
+        loss_D, loss_G = training(lr_images, hr_images)
 
         iteration_losses_D.append(loss_D.detach().item())
         iteration_losses_G.append(loss_G.detach().item())
         total_loss_D += loss_D.detach().item()
         total_loss_G += loss_G.detach().item()
         
-    # lr_scheduler_G.step()
-    # lr_scheduler_D.step()
-        
     epoch_losses_D.append(total_loss_D / len(train_loader))
     epoch_losses_G.append(total_loss_G / len(train_loader))
-    
+
     # Save model checkpoints
     if (epoch + 1) % 2 == 0:
         save_checkpoint(epoch + 1, gan_G, gan_D, optim_G, optim_D, checkpoint_dir)
 
-    # losses once per epoch
+    # Print losses and validate after every epoch
     print(f'Epoch [{epoch + 1}/{num_epoch}] | Loss_D {iteration_losses_D[-1]:.4f} | Loss_G {iteration_losses_G[-1]:.4f} | Time: {time.time() - start_time:.2f} sec')
-    print(f'Epoch [{epoch + 1}/{num_epoch}]  | Loss_D {epoch_losses_D[epoch]:.4f} | Loss_G {epoch_losses_G[epoch]:.4f} | Time: {time.time() - start_time:.2f} sec')
-    
     validate(gan_G, val_loader, epoch, image_dir)
-    # Task1: visualise the generated image at different epochs
-    visualise_generated_images(gan_G, input_dim, epoch, image_dir)
+    visualise_generated_images(gan_G, epoch, image_dir)
 
-    
 # Task2: visualise the loss through a plot
 visualise_loss(iteration_losses_D, iteration_losses_G, image_dir, 'Iteration')
 visualise_loss(epoch_losses_D, epoch_losses_G, image_dir, 'Epoch')
