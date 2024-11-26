@@ -29,7 +29,19 @@ lpips_model = lpips.LPIPS(net='alex').to(device)
 torch.backends.cudnn.benchmark = True
 
 
-# 数据集定义
+# def generate_hr_from_lr(lr_dir, hr_dir, scale=8):
+#     os.makedirs(hr_dir, exist_ok=True)
+#     for img_name in os.listdir(lr_dir):
+#         lr_path = os.path.join(lr_dir, img_name)
+#         hr_path = os.path.join(hr_dir, img_name)
+
+#         lr_image = Image.open(lr_path).convert("RGB")
+#         hr_image = lr_image.resize((lr_image.width * scale, lr_image.height * scale), Image.BICUBIC)
+#         hr_image.save(hr_path)
+
+# generate_hr_from_lr('./dataset/DIV2K_train_LR_x8', './dataset/DIV2K_train_HR', scale=8)
+# generate_hr_from_lr('./dataset/DIV2K_valid_LR_x8', './dataset/DIV2K_valid_HR', scale=8)
+
 class DIV2KDataset(Dataset):
     def __init__(self, lr_dir, hr_dir=None, transform=None):
         self.lr_dir = lr_dir
@@ -74,7 +86,6 @@ train_loader = DataLoader(dataset=train_dataset, batch_size=128, shuffle=True)
 val_loader = DataLoader(dataset=val_dataset, batch_size=128, shuffle=False)
 
 
-# 模型定义
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
@@ -119,15 +130,12 @@ class Discriminator(nn.Module):
         x = self.fc2(x)
         return torch.sigmoid(x)
 
-
-
-# 损失函数定义
 loss_func = nn.BCELoss()
 
 def generator_loss(fake_output, fake_image, real_image):
     adv_loss = loss_func(fake_output, torch.ones_like(fake_output).to(device))
     pixel_loss = F.mse_loss(fake_image, real_image)
-    return adv_loss + 0.01 * pixel_loss
+    return adv_loss + 0.1 * pixel_loss
 
 
 def discriminator_loss(real_output, fake_output):
@@ -135,8 +143,6 @@ def discriminator_loss(real_output, fake_output):
     fake_loss = loss_func(fake_output, torch.zeros_like(fake_output).to(device))
     return real_loss + fake_loss
 
-
-# 保存和加载模型
 def save_model(generator, discriminator, epoch, save_dir="./model_checkpoints"):
     os.makedirs(save_dir, exist_ok=True)
     torch.save({
@@ -176,22 +182,17 @@ def validate(generator, val_loader):
             fake_images = generator(lr_images)
 
             for i in range(hr_images.size(0)):
-                # 转换为 numpy 格式
                 hr_image_np = hr_images[i].permute(1, 2, 0).cpu().numpy()
                 fake_image_np = fake_images[i].permute(1, 2, 0).cpu().numpy()
 
-                # 计算 PSNR
                 psnr_value = psnr(hr_image_np, fake_image_np, data_range=1.0)
-
-                # 计算 SSIM，显式指定 data_range
                 ssim_value = ssim(
                     hr_image_np,
                     fake_image_np,
-                    data_range=1.0,  # 显式指定值域为 1.0
-                    win_size=5,      # 窗口大小为 5
-                    channel_axis=-1  # 指定颜色通道轴
+                    data_range=1.0, 
+                    win_size=5, 
+                    channel_axis=-1,  
                 )
-
                 lpips_value = lpips_model(
                     hr_images[i].unsqueeze(0),
                     fake_images[i].unsqueeze(0)
@@ -202,20 +203,17 @@ def validate(generator, val_loader):
                 total_lpips += lpips_value
                 total_samples += 1
 
-    avg_psnr = total_psnr / total_samples
-    avg_ssim = total_ssim / total_samples
-    avg_lpips = total_lpips / total_samples
+    if total_samples > 0:
+        avg_psnr = total_psnr / total_samples
+        avg_ssim = total_ssim / total_samples
+        avg_lpips = total_lpips / total_samples
+        print(f"Validation - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LPIPS: {avg_lpips:.4f}")
+        return avg_psnr, avg_ssim, avg_lpips
+    else:
+        print("Validation set is empty!")
+        return 0.0, 0.0, 0.0
 
-    print(f"Validation - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LPIPS: {avg_lpips:.4f}")
-
-
-
-generator = Generator().to(device)
-discriminator = Discriminator().to(device)
-
-optim_G = Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
-optim_D = Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
-
+    
 def save_images(epoch, lr_images, hr_images, fake_images, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     for i, (lr, hr, fake) in enumerate(zip(lr_images, hr_images, fake_images)):
@@ -225,10 +223,28 @@ def save_images(epoch, lr_images, hr_images, fake_images, save_dir):
 
 
 
-# start_epoch = load_model("./model_checkpoints/checkpoint_epoch.pth", generator, discriminator, optim_G, optim_D)
+
+generator = Generator().to(device)
+discriminator = Discriminator().to(device)
+
+optim_G = Adam(generator.parameters(), lr=0.0005, betas=(0.5, 0.999))
+optim_D = Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+
+
+# start_epoch = load_model("./model_checkpoints/checkpoint_epoch_33.pth", generator, discriminator, optim_G, optim_D)
 
 start_epoch = 0
-results_dir = "./training_result"
+results_dir = "./training_result_4"
+
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+scheduler_G = ReduceLROnPlateau(optim_G, mode='max', patience=5, factor=0.5, verbose=True)
+scheduler_D = ReduceLROnPlateau(optim_D, mode='max', patience=5, factor=0.5, verbose=True)
+
+gen_update_steps = 1 
+disc_update_steps = 1 
+
+best_psnr = 0.0 
 
 for epoch in range(start_epoch, 50):
     generator.train()
@@ -238,35 +254,106 @@ for epoch in range(start_epoch, 50):
     for batch_idx, (lr_images, hr_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}")):
         lr_images, hr_images = lr_images.to(device), hr_images.to(device)
 
-        # 判别器训练
-        fake_images = generator(lr_images)
-        real_output = discriminator(hr_images)
-        fake_output = discriminator(fake_images.detach())
-        loss_D = discriminator_loss(real_output, fake_output)
-        optim_D.zero_grad()
-        loss_D.backward()
-        optim_D.step()
+        # 动态更新判别器
+        for _ in range(disc_update_steps):
+            fake_images = generator(lr_images)
+            real_output = discriminator(hr_images)
+            fake_output = discriminator(fake_images.detach())
+            loss_D = discriminator_loss(real_output, fake_output)
 
-        # 生成器训练
-        fake_output = discriminator(fake_images)
-        loss_G = generator_loss(fake_output, fake_images, hr_images)
-        optim_G.zero_grad()
-        loss_G.backward()
-        optim_G.step()
+            optim_D.zero_grad()
+            loss_D.backward()
+            optim_D.step()
+
+        # 动态更新生成器
+        for _ in range(gen_update_steps):
+            fake_images = generator(lr_images)
+            fake_output = discriminator(fake_images)
+            loss_G = generator_loss(fake_output, fake_images, hr_images)
+
+            optim_G.zero_grad()
+            loss_G.backward()
+            optim_G.step()
 
         total_loss_D += loss_D.item()
         total_loss_G += loss_G.item()
 
-        # 每个 batch 保存一次图像
-        if batch_idx == 0:  # 只保存第一个 batch 的图像
+        # 保存第一个 batch 的图像
+        if batch_idx == 0:
             save_dir = os.path.join(results_dir, f"epoch_{epoch + 1}")
             save_images(epoch + 1, lr_images.cpu(), hr_images.cpu(), fake_images.cpu(), save_dir)
 
     print(f"Epoch {epoch + 1}, Loss_D: {total_loss_D / len(train_loader):.4f}, Loss_G: {total_loss_G / len(train_loader):.4f}")
 
-    # 保存模型
-    if (epoch + 1) % 1 == 0:
-        save_model(generator, discriminator, epoch + 1)
-
     # 验证
-    validate(generator, val_loader)
+    # 验证并更新调度器
+    avg_psnr, avg_ssim, avg_lpips = validate(generator, val_loader)
+    scheduler_G.step(avg_psnr)
+    scheduler_D.step(avg_psnr)
+
+    # 动态调整生成器和判别器的更新频率
+    if avg_psnr > best_psnr:
+        best_psnr = avg_psnr
+        # 提升 PSNR 时增加判别器的更新次数
+        disc_update_steps = min(disc_update_steps + 1, 3)
+        print(f"PSNR improved to {avg_psnr:.4f}. Increasing discriminator update steps to {disc_update_steps}.")
+    else:
+        # 当 PSNR 停滞时增加生成器更新次数
+        gen_update_steps = min(gen_update_steps + 1, 3)
+        print(f"PSNR did not improve. Increasing generator update steps to {gen_update_steps}.")
+
+    # 保存模型
+    save_model(generator, discriminator, epoch + 1)
+
+
+
+# for epoch in range(start_epoch, 50):
+#     generator.train()
+#     discriminator.train()
+#     total_loss_D, total_loss_G = 0.0, 0.0
+
+#     for batch_idx, (lr_images, hr_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}")):
+#         lr_images, hr_images = lr_images.to(device), hr_images.to(device)
+
+
+
+#         fake_images = generator(lr_images)
+#         # real_output = discriminator(hr_images)
+#         # fake_output = discriminator(fake_images.detach())
+#         # loss_D = discriminator_loss(real_output, fake_output)
+        
+#         # optim_D.zero_grad()
+#         # loss_D.backward()
+#         # optim_D.step()
+#         if batch_idx % 2 == 0:
+#             real_output = discriminator(hr_images)
+#             fake_output = discriminator(fake_images.detach())
+#             loss_D = discriminator_loss(real_output, fake_output)
+#             optim_D.zero_grad()
+#             loss_D.backward()
+#             optim_D.step()
+
+
+        
+  
+#         fake_images = generator(lr_images)
+#         fake_output = discriminator(fake_images)
+#         loss_G = generator_loss(fake_output, fake_images, hr_images)
+#         optim_G.zero_grad()
+#         loss_G.backward()
+#         optim_G.step()
+
+#         total_loss_G += loss_G.item()  # 记录多次 Generator 的总损失
+
+#         total_loss_D += loss_D.item()
+
+#         # 每个 batch 保存一次图像
+#         if batch_idx == 0:  # 只保存第一个 batch 的图像
+#             save_dir = os.path.join(results_dir, f"epoch_{epoch + 1}")
+#             save_images(epoch + 1, lr_images.cpu(), hr_images.cpu(), fake_images.cpu(), save_dir)
+
+#     print(f"Epoch {epoch + 1}, Loss_D: {total_loss_D / len(train_loader):.4f}, Loss_G: {total_loss_G / len(train_loader):.4f}")
+
+#     # 保存模型
+#     if (epoch + 1) % 1 == 0:
+#         save_model(generator, discriminator, epoch + 1)
