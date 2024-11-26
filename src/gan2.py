@@ -10,23 +10,26 @@ import torch.nn.functional as F
 import lpips
 from torch.utils.data import Dataset
 
+import os
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.utils import save_image
+from PIL import Image
+import torch.nn.functional as F
+from tqdm import tqdm
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
+import lpips
+from torch.utils.data import Dataset
+
 device = torch.device("cpu")
 lpips_model = lpips.LPIPS(net='alex').to(device)
 torch.backends.cudnn.benchmark = True
 
-# def generate_hr_from_lr(lr_dir, hr_dir, scale=8):
-#     os.makedirs(hr_dir, exist_ok=True)
-#     for img_name in os.listdir(lr_dir):
-#         lr_path = os.path.join(lr_dir, img_name)
-#         hr_path = os.path.join(hr_dir, img_name)
 
-#         lr_image = Image.open(lr_path).convert("RGB")
-#         hr_image = lr_image.resize((lr_image.width * scale, lr_image.height * scale), Image.BICUBIC)
-#         hr_image.save(hr_path)
-
-# generate_hr_from_lr('./dataset/DIV2K_train_LR_x8', './dataset/DIV2K_train_HR', scale=8)
-# generate_hr_from_lr('./dataset/DIV2K_valid_LR_x8', './dataset/DIV2K_valid_HR', scale=8)
-
+# 数据集定义
 class DIV2KDataset(Dataset):
     def __init__(self, lr_dir, hr_dir=None, transform=None):
         self.lr_dir = lr_dir
@@ -60,10 +63,9 @@ class DIV2KDataset(Dataset):
 
 
 transform = transforms.Compose([
-    transforms.Resize((64, 64)),  # 调整图像大小到 64x64
+    transforms.Resize((64, 64)),
     transforms.ToTensor()
 ])
-
 
 train_dataset = DIV2KDataset('./dataset/DIV2K_train_LR_x8', './dataset/DIV2K_train_HR', transform)
 val_dataset = DIV2KDataset('./dataset/DIV2K_valid_LR_x8', './dataset/DIV2K_valid_HR', transform)
@@ -72,12 +74,13 @@ train_loader = DataLoader(dataset=train_dataset, batch_size=128, shuffle=True)
 val_loader = DataLoader(dataset=val_dataset, batch_size=128, shuffle=False)
 
 
+# 模型定义
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
         self.upsample1 = nn.Conv2d(64, 256, kernel_size=3, stride=1, padding=1)
-        self.upsample2 = nn.PixelShuffle(2) 
+        self.upsample2 = nn.PixelShuffle(2)
         self.conv2 = nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
@@ -86,8 +89,7 @@ class Generator(nn.Module):
         x = self.upsample2(x)
         x = self.conv2(x)
         x = F.interpolate(x, size=(64, 64), mode='bilinear', align_corners=False)
-        x = torch.sigmoid(x)  # 将输出限制在 [0, 1]
-        return x
+        return torch.sigmoid(x)
 
 
 class Discriminator(nn.Module):
@@ -102,7 +104,7 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2)
         )
-        self.fc1 = None  # 延迟初始化
+        self.fc1 = None
         self.fc2 = nn.Linear(1024, 1)
 
     def forward(self, x):
@@ -120,58 +122,112 @@ class Discriminator(nn.Module):
         return torch.sigmoid(x)
 
 
-
-
-
+# 损失函数定义
 loss_func = nn.BCELoss()
 
 def generator_loss(fake_output, fake_image, real_image):
     adv_loss = loss_func(fake_output, torch.ones_like(fake_output).to(device))
     pixel_loss = F.mse_loss(fake_image, real_image)
-    
     return adv_loss + 0.01 * pixel_loss
+
 
 def discriminator_loss(real_output, fake_output):
     real_loss = loss_func(real_output, torch.ones_like(real_output).to(device))
     fake_loss = loss_func(fake_output, torch.zeros_like(fake_output).to(device))
-
     return real_loss + fake_loss
 
-import os
-from torchvision.utils import save_image
 
-def save_images(epoch, lr_images, hr_images, fake_images, save_dir):
+# 保存和加载模型
+def save_model(generator, discriminator, epoch, save_dir="./model_checkpoints"):
     os.makedirs(save_dir, exist_ok=True)
-    for i, (lr, hr, fake) in enumerate(zip(lr_images, hr_images, fake_images)):
-        save_image(lr, os.path.join(save_dir, f'epoch_{epoch}_lr_{i}.png'))
-        save_image(hr, os.path.join(save_dir, f'epoch_{epoch}_hr_{i}.png'))
-        save_image(fake, os.path.join(save_dir, f'epoch_{epoch}_fake_{i}.png'))
+    torch.save({
+        'epoch': epoch,
+        'generator_state_dict': generator.state_dict(),
+        'discriminator_state_dict': discriminator.state_dict(),
+        'optim_G_state_dict': optim_G.state_dict(),
+        'optim_D_state_dict': optim_D.state_dict()
+    }, os.path.join(save_dir, f"checkpoint_epoch_{epoch}.pth"))
+    print(f"Model checkpoint saved for epoch {epoch}.")
 
 
+def load_model(checkpoint_path, generator, discriminator, optim_G, optim_D):
+    checkpoint = torch.load(checkpoint_path)
+    generator.load_state_dict(checkpoint['generator_state_dict'])
+    discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+    optim_G.load_state_dict(checkpoint['optim_G_state_dict'])
+    optim_D.load_state_dict(checkpoint['optim_D_state_dict'])
+    return checkpoint['epoch']
+
+
+def validate(generator, val_loader):
+    generator.eval()
+    total_psnr, total_ssim, total_lpips = 0.0, 0.0, 0.0
+    total_samples = 0
+
+    with torch.no_grad():
+        for lr_images, hr_images in val_loader:
+            lr_images, hr_images = lr_images.to(device), hr_images.to(device)
+            fake_images = generator(lr_images)
+
+            for i in range(hr_images.size(0)):
+                # 转换为 numpy 格式
+                hr_image_np = hr_images[i].permute(1, 2, 0).cpu().numpy()
+                fake_image_np = fake_images[i].permute(1, 2, 0).cpu().numpy()
+
+                # 计算 PSNR
+                psnr_value = psnr(hr_image_np, fake_image_np, data_range=1.0)
+
+                # 计算 SSIM，显式指定 data_range
+                ssim_value = ssim(
+                    hr_image_np,
+                    fake_image_np,
+                    data_range=1.0,  # 显式指定值域为 1.0
+                    win_size=5,      # 窗口大小为 5
+                    channel_axis=-1  # 指定颜色通道轴
+                )
+
+                # 计算 LPIPS
+                lpips_value = lpips_model(
+                    hr_images[i].unsqueeze(0),
+                    fake_images[i].unsqueeze(0)
+                ).item()
+
+                total_psnr += psnr_value
+                total_ssim += ssim_value
+                total_lpips += lpips_value
+                total_samples += 1
+
+    avg_psnr = total_psnr / total_samples
+    avg_ssim = total_ssim / total_samples
+    avg_lpips = total_lpips / total_samples
+
+    print(f"Validation - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LPIPS: {avg_lpips:.4f}")
+
+
+
+# 训练
 generator = Generator().to(device)
 discriminator = Discriminator().to(device)
 
-optim_G = torch.optim.Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
-optim_D = torch.optim.Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+optim_G = Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+optim_D = Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
+
+# 加载预训练模型（可选）
+# start_epoch = load_model("./model_checkpoints/checkpoint_epoch_X.pth", generator, discriminator, optim_G, optim_D)
 
 results_dir = "./training_results"
+start_epoch = 0
 
-import torch
-from tqdm import tqdm
-
-for epoch in range(10):
+for epoch in range(start_epoch, 10):
     generator.train()
     discriminator.train()
-    total_loss_D = 0
-    total_loss_G = 0
+    total_loss_D, total_loss_G = 0.0, 0.0
 
-    for batch_idx, (lr_images, hr_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+    for lr_images, hr_images in tqdm(train_loader, desc=f"Epoch {epoch + 1}"):
         lr_images, hr_images = lr_images.to(device), hr_images.to(device)
 
-        # 生成器生成图像
+        # 判别器训练
         fake_images = generator(lr_images)
-
-        # 判别器损失
         real_output = discriminator(hr_images)
         fake_output = discriminator(fake_images.detach())
         loss_D = discriminator_loss(real_output, fake_output)
@@ -179,7 +235,7 @@ for epoch in range(10):
         loss_D.backward()
         optim_D.step()
 
-        # 生成器损失
+        # 生成器训练
         fake_output = discriminator(fake_images)
         loss_G = generator_loss(fake_output, fake_images, hr_images)
         optim_G.zero_grad()
@@ -189,9 +245,11 @@ for epoch in range(10):
         total_loss_D += loss_D.item()
         total_loss_G += loss_G.item()
 
-        # 每个batch保存一些图像
-        if batch_idx == 0:  # 每个epoch只保存一次
-            save_dir = os.path.join(results_dir, f"epoch_{epoch+1}")
-            save_images(epoch + 1, lr_images.cpu(), hr_images.cpu(), fake_images.cpu(), save_dir)
+    print(f"Epoch {epoch + 1}, Loss_D: {total_loss_D / len(train_loader):.4f}, Loss_G: {total_loss_G / len(train_loader):.4f}")
 
-    print(f"Epoch {epoch+1}, Loss_D: {total_loss_D/len(train_loader):.4f}, Loss_G: {total_loss_G/len(train_loader):.4f}")
+    # 保存模型
+    if (epoch + 1) % 2 == 0:
+        save_model(generator, discriminator, epoch + 1)
+
+    # 验证
+    validate(generator, val_loader)
