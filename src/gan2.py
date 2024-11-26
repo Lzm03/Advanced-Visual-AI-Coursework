@@ -104,22 +104,21 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2)
         )
-        self.fc1 = None
+        self.flatten_size = 128 * 16 * 16 
+        self.fc1 = nn.Sequential(
+            nn.Linear(self.flatten_size, 1024),
+            nn.LeakyReLU(0.2)
+        )
         self.fc2 = nn.Linear(1024, 1)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
-        if self.fc1 is None:
-            flatten_size = x.view(x.size(0), -1).size(1)
-            self.fc1 = nn.Sequential(
-                nn.Linear(flatten_size, 1024),
-                nn.LeakyReLU(0.2)
-            )
         x = x.view(x.size(0), -1)
         x = self.fc1(x)
         x = self.fc2(x)
         return torch.sigmoid(x)
+
 
 
 # 损失函数定义
@@ -153,10 +152,17 @@ def save_model(generator, discriminator, epoch, save_dir="./model_checkpoints"):
 def load_model(checkpoint_path, generator, discriminator, optim_G, optim_D):
     checkpoint = torch.load(checkpoint_path)
     generator.load_state_dict(checkpoint['generator_state_dict'])
-    discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+    
+    discriminator_state_dict = checkpoint['discriminator_state_dict']
+    model_state_dict = discriminator.state_dict()
+    updated_state_dict = {k: v for k, v in discriminator_state_dict.items() if k in model_state_dict}
+    model_state_dict.update(updated_state_dict)
+    discriminator.load_state_dict(model_state_dict)
+
     optim_G.load_state_dict(checkpoint['optim_G_state_dict'])
     optim_D.load_state_dict(checkpoint['optim_D_state_dict'])
     return checkpoint['epoch']
+
 
 
 def validate(generator, val_loader):
@@ -186,7 +192,6 @@ def validate(generator, val_loader):
                     channel_axis=-1  # 指定颜色通道轴
                 )
 
-                # 计算 LPIPS
                 lpips_value = lpips_model(
                     hr_images[i].unsqueeze(0),
                     fake_images[i].unsqueeze(0)
@@ -205,25 +210,32 @@ def validate(generator, val_loader):
 
 
 
-# 训练
 generator = Generator().to(device)
 discriminator = Discriminator().to(device)
 
 optim_G = Adam(generator.parameters(), lr=0.0001, betas=(0.5, 0.999))
 optim_D = Adam(discriminator.parameters(), lr=0.0001, betas=(0.5, 0.999))
 
-# 加载预训练模型（可选）
-# start_epoch = load_model("./model_checkpoints/checkpoint_epoch_X.pth", generator, discriminator, optim_G, optim_D)
+def save_images(epoch, lr_images, hr_images, fake_images, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+    for i, (lr, hr, fake) in enumerate(zip(lr_images, hr_images, fake_images)):
+        save_image(lr, os.path.join(save_dir, f"epoch_{epoch}_lr_{i}.png"))
+        save_image(hr, os.path.join(save_dir, f"epoch_{epoch}_hr_{i}.png"))
+        save_image(fake, os.path.join(save_dir, f"epoch_{epoch}_fake_{i}.png"))
 
-results_dir = "./training_results"
+
+
+# start_epoch = load_model("./model_checkpoints/checkpoint_epoch.pth", generator, discriminator, optim_G, optim_D)
+
 start_epoch = 0
+results_dir = "./training_result"
 
-for epoch in range(start_epoch, 10):
+for epoch in range(start_epoch, 50):
     generator.train()
     discriminator.train()
     total_loss_D, total_loss_G = 0.0, 0.0
 
-    for lr_images, hr_images in tqdm(train_loader, desc=f"Epoch {epoch + 1}"):
+    for batch_idx, (lr_images, hr_images) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}")):
         lr_images, hr_images = lr_images.to(device), hr_images.to(device)
 
         # 判别器训练
@@ -245,10 +257,15 @@ for epoch in range(start_epoch, 10):
         total_loss_D += loss_D.item()
         total_loss_G += loss_G.item()
 
+        # 每个 batch 保存一次图像
+        if batch_idx == 0:  # 只保存第一个 batch 的图像
+            save_dir = os.path.join(results_dir, f"epoch_{epoch + 1}")
+            save_images(epoch + 1, lr_images.cpu(), hr_images.cpu(), fake_images.cpu(), save_dir)
+
     print(f"Epoch {epoch + 1}, Loss_D: {total_loss_D / len(train_loader):.4f}, Loss_G: {total_loss_G / len(train_loader):.4f}")
 
     # 保存模型
-    if (epoch + 1) % 2 == 0:
+    if (epoch + 1) % 1 == 0:
         save_model(generator, discriminator, epoch + 1)
 
     # 验证
