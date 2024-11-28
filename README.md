@@ -18,7 +18,10 @@
   - Learning Rate: `0.0001`
   - Epochs: `1000`
   - Batch Size: `16`
-
+---
+## Dataset
+- Download the DIV2K dataset from [DIV2K Dataset](https://data.vision.ee.ethz.ch/cvl/DIV2K/)
+ and organize it as described in the project structure.
 ---
 ## Training
 
