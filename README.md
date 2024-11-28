@@ -20,7 +20,7 @@
   - Batch Size: `16`
 ---
 ## Dataset
-- Download the DIV2K dataset from [DIV2K Dataset](https://data.vision.ee.ethz.ch/cvl/DIV2K/)
+- Download the DIV2K dataset from [DIV2K Dataset](https://data.vision.ee.ethz.ch/cvl/DIV2K/)(Use the NTIRE 2018 dataset and, particularly, the Train and Validation Track 1 – bicubic x 8)
  and organize it as described in the project structure.
 ---
 ## Training
